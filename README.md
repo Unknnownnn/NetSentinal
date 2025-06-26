@@ -56,7 +56,3 @@ npm start
 ## Security Notice
 
 This tool requires administrator/root privileges to perform network scanning. Please use responsibly and only on networks you own or have permission to scan.
-
-## License
-
-MIT License - See LICENSE file for details 
