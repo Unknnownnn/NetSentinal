@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-nmap
+scapy
+python-socketio
+python-multipart
+python-jose[cryptography]
+python-dotenv
+psutil
+mac-vendor-lookup
+netifaces
+requests
+websockets

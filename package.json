@@ -1,0 +1,12 @@
+{
+  "name": "netsentinel",
+  "version": "1.0.0",
+  "description": "Network security monitoring and device tracking",
+  "scripts": {
+    "start": "concurrently \"cd backend && python app.py\" \"cd frontend && npm run dev\"",
+    "install": "cd frontend && npm install && cd ../backend && pip install -r requirements.txt"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+} 
