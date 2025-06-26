@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { Device } from '../types/device';
 import { formatBytes } from '../utils/format';
+import wsClient from '../utils/websocket';
 
 interface DeviceListProps {
   devices: Device[];
@@ -21,6 +22,8 @@ const getDeviceIcon = (deviceType: string): string => {
       return '🎮';
     case 'IoT Device':
       return '🏠';
+    case 'Network Device':
+      return '🌐';
     default:
       return '📱';
   }
@@ -31,7 +34,21 @@ const DeviceList: React.FC<DeviceListProps> = ({ devices, isScanning }) => {
 
   const handleDeviceClick = (device: Device) => {
     setSelectedDevice(device);
+    // Request updated device info if type or vendor is unknown
+    if (device.device_type === 'Unknown' || device.vendor === 'Unknown') {
+      wsClient.send({
+        type: 'get_device_info',
+        mac: device.mac
+      });
+    }
   };
+
+  // Listen for device info updates
+  wsClient.on('device_info', (data: { data: Device }) => {
+    if (selectedDevice && data.data.mac === selectedDevice.mac) {
+      setSelectedDevice(data.data);
+    }
+  });
 
   const closeModal = () => {
     setSelectedDevice(null);
@@ -132,7 +149,12 @@ const DeviceList: React.FC<DeviceListProps> = ({ devices, isScanning }) => {
               </div>
               <div>
                 <p className="text-sm text-gray-400">Device Type</p>
-                <p className="text-base text-white">{selectedDevice.device_type}</p>
+                <p className="text-base text-white">
+                  {selectedDevice.device_type}
+                  {selectedDevice.device_type === 'Unknown' && (
+                    <span className="text-xs text-gray-400 ml-2">(Identifying...)</span>
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-sm text-gray-400">IP Address</p>
@@ -144,7 +166,12 @@ const DeviceList: React.FC<DeviceListProps> = ({ devices, isScanning }) => {
               </div>
               <div>
                 <p className="text-sm text-gray-400">Vendor</p>
-                <p className="text-base text-white">{selectedDevice.vendor}</p>
+                <p className="text-base text-white">
+                  {selectedDevice.vendor}
+                  {selectedDevice.vendor === 'Unknown' && (
+                    <span className="text-xs text-gray-400 ml-2">(Looking up...)</span>
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-sm text-gray-400">Status</p>

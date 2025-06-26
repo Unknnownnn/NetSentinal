@@ -11,3 +11,4 @@ mac-vendor-lookup
 netifaces
 requests
 websockets
+mac-vendor-lookup

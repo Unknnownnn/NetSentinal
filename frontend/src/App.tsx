@@ -8,7 +8,7 @@ import wsClient from './utils/websocket';
 function App() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [isScanning, setIsScanning] = useState(false);
-  const [isAutoScan, setIsAutoScan] = useState(true);
+  const [isAutoScan, setIsAutoScan] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
@@ -19,6 +19,9 @@ function App() {
 
     wsClient.on('network_update', (data: { data: Device[] }) => {
       setDevices(data.data);
+      if (!isAutoScan) {
+        setIsScanning(false);
+      }
     });
 
     wsClient.on('scan_start', () => {
@@ -26,7 +29,9 @@ function App() {
     });
 
     wsClient.on('scan_complete', () => {
-      setIsScanning(false);
+      if (!isAutoScan) {
+        setIsScanning(false);
+      }
     });
 
     wsClient.on('auto_scan_status', (data: { enabled: boolean }) => {
@@ -40,10 +45,15 @@ function App() {
     return () => {
       wsClient.disconnect();
     };
-  }, []);
+  }, [isAutoScan]);
 
   const handleScanClick = () => {
     wsClient.send({ type: 'manual_scan' });
+  };
+
+  const handleStopScanClick = () => {
+    wsClient.send({ type: 'stop_scan' });
+    setIsScanning(false);
   };
 
   const handleAutoScanToggle = () => {
@@ -57,47 +67,56 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      <header className="bg-gray-800 shadow-lg">
+      <header className="bg-gray-800 shadow">
         <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <h1 className="text-2xl font-bold">NetSentinel</h1>
-              <div className="ml-4 flex items-center space-x-2">
+          <div className="flex justify-between items-center">
+            <h1 className="text-2xl font-bold">NetSentinel</h1>
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-2">
                 <button
-                  onClick={handleScanClick}
-                  className={`px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 transition-colors ${
-                    isScanning ? 'opacity-50 cursor-not-allowed' : ''
+                  onClick={handleAutoScanToggle}
+                  className={`px-4 py-2 rounded-md text-sm font-medium ${
+                    isAutoScan
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700 text-gray-300'
                   }`}
-                  disabled={isScanning}
                 >
-                  {isScanning ? 'Scanning...' : 'Scan Network'}
+                  Auto Scan: {isAutoScan ? 'On' : 'Off'}
                 </button>
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <span>Auto-scan</span>
-                  <div
-                    className={`relative inline-block w-12 h-6 transition-colors duration-200 ease-in-out rounded-full ${
-                      isAutoScan ? 'bg-green-600' : 'bg-gray-600'
-                    }`}
-                    onClick={handleAutoScanToggle}
-                  >
-                    <div
-                      className={`absolute left-1 top-1 w-4 h-4 transition-transform duration-200 ease-in-out bg-white rounded-full transform ${
-                        isAutoScan ? 'translate-x-6' : 'translate-x-0'
+                {!isAutoScan && (
+                  <>
+                    <button
+                      onClick={handleScanClick}
+                      disabled={isScanning}
+                      className={`px-4 py-2 rounded-md text-sm font-medium ${
+                        isScanning
+                          ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                          : 'bg-blue-600 text-white hover:bg-blue-700'
                       }`}
-                    />
-                  </div>
-                </label>
+                    >
+                      {isScanning ? 'Scanning...' : 'Scan Network'}
+                    </button>
+                    {isScanning && (
+                      <button
+                        onClick={handleStopScanClick}
+                        className="px-4 py-2 rounded-md text-sm font-medium bg-red-600 text-white hover:bg-red-700"
+                      >
+                        Stop Scan
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span
-                className={`inline-block w-3 h-3 rounded-full ${
-                  isConnected ? 'bg-green-500' : 'bg-red-500'
-                }`}
-              />
-              <span className="text-sm">
-                {isConnected ? 'Connected' : 'Disconnected'}
-              </span>
+              <div className="flex items-center space-x-2">
+                <span
+                  className={`inline-block w-3 h-3 rounded-full ${
+                    isConnected ? 'bg-green-500' : 'bg-red-500'
+                  }`}
+                />
+                <span className="text-sm">
+                  {isConnected ? 'Connected' : 'Disconnected'}
+                </span>
+              </div>
             </div>
           </div>
         </div>
