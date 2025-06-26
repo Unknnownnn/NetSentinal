@@ -37,11 +37,6 @@ cd frontend
 npm install
 ```
 
-4. Create a .env file in the root directory:
-```bash
-SCAN_INTERVAL=300  # Network scan interval in seconds
-JWT_SECRET=your_secret_key
-```
 
 ## Usage
 
@@ -61,7 +56,3 @@ npm start
 ## Security Notice
 
 This tool requires administrator/root privileges to perform network scanning. Please use responsibly and only on networks you own or have permission to scan.
-
-## License
-
-MIT License - See LICENSE file for details 
