@@ -37,11 +37,6 @@ cd frontend
 npm install
 ```
 
-4. Create a .env file in the root directory:
-```bash
-SCAN_INTERVAL=300  # Network scan interval in seconds
-JWT_SECRET=your_secret_key
-```
 
 ## Usage
 
