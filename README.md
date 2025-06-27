@@ -1,6 +1,6 @@
 # NetSentinel - Real-Time Network Threat Visualizer
 
-NetSentinel is a consumer-facing network security tool that provides real-time visualization and monitoring of your local network. It helps identify potential security threats and unusual network behavior through an intuitive and beautiful interface.
+A python based network security tool that provides real-time visualization and monitoring of your local network and helps unknown devices connected and potential security threats and unusual network behavior through an intuitive interface.
 
 ## Features
 
