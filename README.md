@@ -5,11 +5,9 @@ NetSentinel is a consumer-facing network security tool that provides real-time v
 ## Features
 
 - 🔍 **Device Discovery**: Automatically scans and identifies all devices on your local network
-- 📊 **Live Dashboard**: Beautiful real-time visualization of network activity
+- 📊 **Live Dashboard**: Real-time visualization of network activity
 - 🚨 **Threat Detection**: Identifies suspicious behavior and potential security risks
 - 📱 **Device Tracking**: Monitors device bandwidth usage and active services
-- 🔔 **Alert System**: Real-time notifications for new device connections
-- 📋 **Network Reports**: Export detailed network analysis reports
 
 ## Prerequisites
 
