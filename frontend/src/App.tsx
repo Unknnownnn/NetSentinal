@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Device } from './types/device';
+import wsClient from './utils/websocket';
 import NetworkMap from './components/NetworkMap';
 import DeviceList from './components/DeviceList';
 import AlertPanel from './components/AlertPanel';
-import wsClient from './utils/websocket';
+import Layout from './components/Layout';
+import './App.css';
 
 function App() {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -123,16 +125,19 @@ function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+        {/* Main row - Network Map and Security Alerts */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-gray-800 rounded-lg shadow-lg p-4">
             <h2 className="text-xl font-semibold mb-4">Network Map</h2>
             <NetworkMap devices={devices} isScanning={isScanning} />
           </div>
           <div className="bg-gray-800 rounded-lg shadow-lg p-4">
-            <h2 className="text-xl font-semibold mb-4">Alerts</h2>
+            <h2 className="text-xl font-semibold mb-4">Security Alerts</h2>
             <AlertPanel devices={devices} />
           </div>
         </div>
+
+        {/* Connected Devices */}
         <div className="bg-gray-800 rounded-lg shadow-lg p-4">
           <h2 className="text-xl font-semibold mb-4">Connected Devices</h2>
           <DeviceList devices={devices} isScanning={isScanning} />

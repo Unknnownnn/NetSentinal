@@ -18,6 +18,10 @@ import winreg
 import requests
 import websockets
 import time
+
+from oui_database import get_vendor_from_oui, get_device_type_from_vendor
+from security_monitor import SecurityMonitor, NetworkDefense, VulnerabilityScanner
+from config import get_config, update_config, SECURITY_CONFIG, DEFENSE_CONFIG, API_CONFIG
 from pathlib import Path
 from mac_vendor_lookup import MacLookup
 import queue
@@ -25,6 +29,9 @@ import threading
 
 # Import OUI database
 from oui_database import get_vendor_from_oui, get_device_type_from_vendor, DEVICE_TYPE_PATTERNS
+
+# Import security monitoring
+from security_monitor import security_monitor, network_defense, vulnerability_scanner
 
 # Initialize MAC lookup and thread pool
 try:
@@ -38,6 +45,10 @@ except Exception as e:
     print(f"Warning: Could not initialize MAC vendor lookup: {e}")
     mac_lookup = None
     thread_pool = ThreadPoolExecutor(max_workers=4)
+
+# Global WebSocket state
+websocket_server_active = False
+connected_clients: List[WebSocket] = []
 
 class VendorLookupService:
     """Background service for vendor lookups to avoid blocking the main event loop"""
@@ -439,17 +450,15 @@ def identify_device_type_sync(mac: str, hostname: str, ports: set, ip: str = Non
 
 app = FastAPI(title="NetSentinel API")
 
-# Enable CORS
+# Enable CORS using configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=API_CONFIG["cors_origins"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Store connected clients
-connected_clients: List[WebSocket] = []
 # Store device history
 device_history: Dict[str, dict] = {}
 # Store live packet data
@@ -601,6 +610,9 @@ def packet_callback(packet):
             # Process DNS packets
             if DNS in packet:
                 process_dns_packet(packet, src_ip, dst_ip)
+            
+            # Security analysis
+            security_monitor.analyze_packet(packet, src_ip, dst_ip, src_mac)
                 
     except Exception as e:
         print(f"Error processing packet: {str(e)}")
@@ -766,7 +778,60 @@ def update_device_info(ip: str, mac: str, skip_vendor_lookup: bool = False):
                 alerts = check_device_alerts(mac, device)
                 if alerts:
                     device['suspicious'] = True
-                    asyncio.create_task(notify_clients_alerts(alerts))
+                    schedule_alert_notification(alerts)
+                
+    except Exception as e:
+        print(f"Error updating device info: {str(e)}")
+
+def schedule_alert_notification(alerts):
+    """Schedule alert notification safely"""
+    global websocket_server_active
+    
+    print(f"schedule_alert_notification called: server_active={websocket_server_active}, clients={len(connected_clients)}")
+    
+    # Don't try to send if no WebSocket server is active
+    if not websocket_server_active or not connected_clients:
+        print("Skipping WebSocket notification - no active server or clients")
+        return
+        
+    try:
+        # Try to get the current event loop
+        try:
+            loop = asyncio.get_running_loop()
+            print("Creating WebSocket notification task")
+            # Event loop is running, create task
+            asyncio.create_task(notify_clients_alerts(alerts))
+        except RuntimeError:
+            # No event loop running, skip WebSocket notifications
+            print("No running event loop for WebSocket notifications")
+            
+    except Exception as e:
+        print(f"Error scheduling alert notification: {e}")
+
+def schedule_device_notification(device_mac: str):
+    """Schedule device update notification safely"""
+    global websocket_server_active
+    
+    # Don't try to send if no WebSocket server is active
+    if not websocket_server_active or not connected_clients:
+        return
+        
+    try:
+        # Try to get the current event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # Event loop is running, create task
+            asyncio.create_task(notify_device_update(device_mac))
+        except RuntimeError:
+            # No event loop running, skip WebSocket notifications
+            print("No running event loop for WebSocket notifications")
+            
+    except Exception as e:
+        print(f"Error scheduling device notification: {e}")
+        # No event loop running, we can't send WebSocket notifications
+        print("No event loop available for WebSocket notifications")
+    except Exception as e:
+        print(f"Error scheduling device notification: {e}")
                 
     except Exception as e:
         print(f"Error updating device info: {str(e)}")
@@ -1001,36 +1066,77 @@ async def scan_network():
         print(f"Error in scan_network: {str(e)}")
         return []
 
-async def notify_clients_alerts(alerts):
-    """Notify all connected clients of new alerts"""
-    for client in connected_clients:
+async def safe_notify_clients_alerts(alerts):
+    """Safely notify all connected clients of new alerts with proper error handling"""
+    if not connected_clients:
+        return
+        
+    disconnected_clients = []
+    for client in list(connected_clients):  # Create a copy to avoid modification during iteration
         try:
+            # Simply try to send and catch any exceptions
             await client.send_json({
                 'type': 'alerts',
                 'data': alerts
             })
-        except:
-            continue
+        except Exception as e:
+            print(f"Error sending alert to client: {e}")
+            disconnected_clients.append(client)
+    
+    # Remove disconnected clients
+    for client in disconnected_clients:
+        if client in connected_clients:
+            connected_clients.remove(client)
+            print(f"Removed disconnected client. Remaining: {len(connected_clients)}")
+
+async def notify_clients_alerts(alerts):
+    """Notify all connected clients of new alerts"""
+    try:
+        print(f"notify_clients_alerts called with {len(alerts)} alerts, {len(connected_clients)} clients")
+        
+        if not connected_clients:
+            print("No connected clients to notify")
+            return
+            
+        await safe_notify_clients_alerts(alerts)
+    except Exception as e:
+        print(f"Error in notify_clients_alerts: {e}")
 
 async def notify_device_update(device_mac: str):
     """Notify all connected clients of device updates"""
-    if device_mac in device_history:
-        device = device_history[device_mac]
-        for client in connected_clients:
-            try:
-                await client.send_json({
-                    'type': 'device_info',
-                    'data': device
-                })
-            except:
-                continue
+    if device_mac not in device_history:
+        return
+        
+    if not connected_clients:
+        return
+        
+    device = device_history[device_mac]
+    disconnected_clients = []
+    for client in list(connected_clients):  # Create a copy to avoid modification during iteration
+        try:
+            # Simply try to send and catch any exceptions
+            await client.send_json({
+                'type': 'device_info',
+                'data': device
+            })
+        except Exception as e:
+            print(f"Error sending device update to client: {e}")
+            disconnected_clients.append(client)
+    
+    # Remove disconnected clients
+    for client in disconnected_clients:
+        if client in connected_clients:
+            connected_clients.remove(client)
+            print(f"Removed disconnected client. Remaining: {len(connected_clients)}")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global websocket_server_active
     try:
         print("New WebSocket connection attempt")
         await websocket.accept()
         connected_clients.append(websocket)
+        websocket_server_active = True  # Mark server as active
         print(f"Client connected. Total clients: {len(connected_clients)}")
         
         # Send initial connection confirmation
@@ -1144,7 +1250,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     print(f"Background lookup complete - Vendor: {found_vendor}, Type: {found_device_type}")
                                     
                                     # Send updated info to all connected clients
-                                    asyncio.create_task(notify_device_update(mac_addr))
+                                    schedule_device_notification(mac_addr)
                             
                             request_vendor_lookup_async(device_mac, vendor_callback)
                         
@@ -1203,6 +1309,11 @@ async def websocket_endpoint(websocket: WebSocket):
             connected_clients.remove(websocket)
             print(f"Client disconnected. Remaining clients: {len(connected_clients)}")
         
+        # Update server active status
+        if len(connected_clients) == 0:
+            websocket_server_active = False
+            print("No more WebSocket clients, marking server as inactive")
+        
         try:
             await websocket.close()
         except:
@@ -1225,6 +1336,224 @@ async def get_interfaces():
 async def get_device_history():
     """Get device history"""
     return {"history": device_history}
+
+@app.post("/api/security/ping")
+async def ping_device(request: dict):
+    """Ping a specific device"""
+    ip = request.get('ip')
+    count = request.get('count', 4)
+    
+    if not ip:
+        return {"error": "IP address required"}
+    
+    try:
+        result = network_defense.ping_device(ip, count)
+        return {"ping_result": result}
+    except Exception as e:
+        print(f"Error pinging device: {e}")
+        return {"error": f"Failed to ping device: {str(e)}"}
+
+@app.post("/api/security/deauth")
+async def deauth_device(request: dict):
+    """Deauthenticate a device from the network"""
+    target_mac = request.get('target_mac')
+    gateway_mac = request.get('gateway_mac')
+    interface = request.get('interface')
+    
+    if not target_mac or not gateway_mac:
+        return {"error": "Target MAC and Gateway MAC required"}
+    
+    try:
+        result = network_defense.deauth_device(target_mac, gateway_mac, interface)
+        return {"deauth_result": result}
+    except Exception as e:
+        print(f"Error deauthenticating device: {e}")
+        return {"error": f"Failed to deauthenticate device: {str(e)}"}
+
+@app.post("/api/security/block")
+async def block_device(request: dict):
+    """Block a device using various methods"""
+    target_ip = request.get('target_ip')
+    target_mac = request.get('target_mac') 
+    gateway_ip = request.get('gateway_ip')
+    method = request.get('method', 'arp')
+    
+    if not target_ip or not target_mac:
+        return {"error": "Target IP and MAC required"}
+    
+    try:
+        if method == 'arp':
+            result = network_defense.block_device_arp(target_ip, target_mac, gateway_ip)
+        else:
+            result = {"error": "Unknown blocking method"}
+        
+        return {"block_result": result}
+    except Exception as e:
+        print(f"Error blocking device: {e}")
+        return {"error": f"Failed to block device: {str(e)}"}
+
+@app.post("/api/security/quarantine")
+async def quarantine_device(request: dict):
+    """Quarantine a suspicious device"""
+    mac = request.get('mac')
+    reason = request.get('reason', 'Manual quarantine')
+    
+    if not mac:
+        return {"error": "MAC address required"}
+    
+    try:
+        result = network_defense.quarantine_device(mac, reason)
+        
+        # Also update device status in history
+        if mac in device_history:
+            device_history[mac]['quarantined'] = True
+            device_history[mac]['quarantine_reason'] = reason
+        
+        return {"quarantine_result": result}
+    except Exception as e:
+        print(f"Error quarantining device: {e}")
+        return {"error": f"Failed to quarantine device: {str(e)}"}
+
+@app.post("/api/security/release")
+async def release_quarantine(request: dict):
+    """Release device from quarantine"""
+    mac = request.get('mac')
+    
+    if not mac:
+        return {"error": "MAC address required"}
+    
+    try:
+        result = network_defense.release_quarantine(mac)
+        
+        # Update device status in history
+        if mac in device_history:
+            device_history[mac]['quarantined'] = False
+            device_history[mac].pop('quarantine_reason', None)
+        
+        return {"release_result": result}
+    except Exception as e:
+        print(f"Error releasing quarantine: {e}")
+        return {"error": f"Failed to release quarantine: {str(e)}"}
+
+@app.get("/api/security/alerts")
+async def get_security_alerts():
+    """Get recent security alerts"""
+    try:
+        alerts = security_monitor.get_alerts()
+        return {"alerts": alerts}
+    except Exception as e:
+        print(f"Error getting security alerts: {e}")
+        return {"alerts": []}
+
+@app.post("/api/security/whitelist")
+async def whitelist_device(request: dict):
+    """Add device to whitelist"""
+    mac = request.get('mac')
+    
+    if not mac:
+        return {"error": "MAC address required"}
+    
+    try:
+        device_info = device_history.get(mac, {})
+        security_monitor.register_device(mac, device_info, is_authorized=True)
+        security_monitor.whitelist_device(mac)
+        
+        return {"message": f"Device {mac} added to whitelist"}
+    except Exception as e:
+        print(f"Error whitelisting device: {e}")
+        return {"error": f"Failed to whitelist device: {str(e)}"}
+
+@app.post("/api/security/blacklist") 
+async def blacklist_device(request: dict):
+    """Add device to blacklist"""
+    mac = request.get('mac')
+    
+    if not mac:
+        return {"error": "MAC address required"}
+    
+    try:
+        security_monitor.blacklist_device(mac)
+        
+        # Also quarantine the device
+        network_defense.quarantine_device(mac, "Blacklisted device")
+        
+        return {"message": f"Device {mac} added to blacklist"}
+    except Exception as e:
+        print(f"Error blacklisting device: {e}")
+        return {"error": f"Failed to blacklist device: {str(e)}"}
+
+@app.post("/api/security/scan-vulnerabilities")
+async def scan_vulnerabilities(request: dict):
+    """Scan device for vulnerabilities"""
+    ip = request.get('ip')
+    ports = request.get('ports')
+    
+    if not ip:
+        return {"error": "IP address required"}
+    
+    try:
+        result = await vulnerability_scanner.scan_device_vulnerabilities(ip, ports)
+        return {"vulnerability_scan": result}
+    except Exception as e:
+        print(f"Error scanning vulnerabilities: {e}")
+        return {"error": f"Failed to scan vulnerabilities: {str(e)}"}
+
+@app.get("/api/security/vulnerability-results/{ip}")
+async def get_vulnerability_results(ip: str):
+    """Get vulnerability scan results for device"""
+    try:
+        results = vulnerability_scanner.get_scan_results(ip)
+        return {"results": results}
+    except Exception as e:
+        print(f"Error getting vulnerability results: {e}")
+        return {"results": {}}
+
+@app.post("/api/security/test-alert")
+async def create_test_alert(request: dict):
+    """Create a test security alert for debugging"""
+    alert_type = request.get('type', 'test')
+    severity = request.get('severity', 'medium')
+    message = request.get('message', 'Test security alert')
+    details = request.get('details', {})
+    
+    try:
+        # Generate test alert using security monitor
+        security_monitor._generate_alert(alert_type, severity, message, details)
+        
+        return {"message": "Test alert generated", "type": alert_type}
+    except Exception as e:
+        print(f"Error creating test alert: {e}")
+        return {"error": f"Failed to create test alert: {str(e)}"}
+
+@app.get("/api/security/trust-score/{mac}")
+async def get_trust_score(mac: str):
+    """Get trust score for device"""
+    try:
+        score = security_monitor.get_device_trust_score(mac)
+        return {"trust_score": score}
+    except Exception as e:
+        print(f"Error getting trust score: {e}")
+        return {"trust_score": 0}
+
+@app.get("/api/security/quarantined")
+async def get_quarantined_devices():
+    """Get list of quarantined devices"""
+    try:
+        devices = network_defense.get_quarantined_devices()
+        return {"quarantined_devices": devices}
+    except Exception as e:
+        print(f"Error getting quarantined devices: {e}")
+        return {"quarantined_devices": []}
+
+@app.get("/api/security/blocked")
+async def get_blocked_devices():
+    """Get list of blocked devices"""
+    try:
+        devices = network_defense.get_blocked_devices()
+        return {"blocked_devices": devices}
+    except Exception as e:
+        print(f"Error getting blocked devices: {e}")
+        return {"blocked_devices": []}
 
 async def probe_device(ip: str, mac: str) -> dict:
     """Actively probe a device to gather more information"""
@@ -1332,6 +1661,64 @@ def calculate_device_type_confidence(device_info: dict, ports: set) -> List[Tupl
     
     return sorted(scores, key=lambda x: x[1], reverse=True)
 
+@app.get("/api/config")
+async def get_configuration():
+    """Get current configuration"""
+    return get_config()
+
+@app.post("/api/config/{section}/{key}")
+async def update_configuration(section: str, key: str, request: dict):
+    """Update configuration value"""
+    value = request.get('value')
+    
+    if update_config(section, key, value):
+        return {"message": f"Updated {section}.{key} to {value}"}
+    else:
+        return {"error": f"Invalid section or key: {section}.{key}"}
+
+@app.get("/api/config/{section}")
+async def get_section_config(section: str):
+    """Get configuration for specific section"""
+    config = get_config()
+    if section in config:
+        return {section: config[section]}
+    else:
+        return {"error": f"Section '{section}' not found"}
+
+@app.get("/api/system/status")
+async def get_system_status():
+    """Get system performance and status"""
+    import psutil
+    
+    cpu_percent = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    
+    return {
+        "cpu_usage": cpu_percent,
+        "memory_usage": memory.percent,
+        "memory_available": memory.available,
+        "disk_usage": disk.percent,
+        "disk_free": disk.free,
+        "active_devices": len(device_history),
+        "security_alerts": len(security_monitor.get_alerts()),
+        "quarantined_devices": len(network_defense.get_quarantined_devices()),
+        "blocked_devices": len(network_defense.get_blocked_devices()),
+    }
+
+@app.post("/api/system/reset")
+async def reset_system():
+    """Reset system data (clear device history, alerts, etc.)"""
+    global device_history
+    device_history.clear()
+    
+    # Reset security monitoring
+    security_monitor.clear_alerts()
+    network_defense.clear_quarantine()
+    network_defense.clear_blocks()
+    
+    return {"message": "System data reset successfully"}
+
 if __name__ == "__main__":
     # Start the vendor lookup service
     vendor_service.start()
@@ -1339,7 +1726,7 @@ if __name__ == "__main__":
     
     import uvicorn
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host=API_CONFIG["host"], port=API_CONFIG["port"])
     finally:
         # Stop the vendor service when shutting down
         vendor_service.stop()
