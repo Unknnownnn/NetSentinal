@@ -20,10 +20,768 @@ import websockets
 import time
 from pathlib import Path
 from mac_vendor_lookup import MacLookup
+import queue
+import threading
 
 # Initialize MAC lookup and thread pool
-mac_lookup = MacLookup()
-thread_pool = ThreadPoolExecutor(max_workers=4)
+try:
+    mac_lookup = MacLookup()
+    thread_pool = ThreadPoolExecutor(max_workers=4)
+    try:
+        mac_lookup.update_vendors()
+    except Exception as e:
+        print(f"Warning: Could not update MAC vendor database: {e}")
+except Exception as e:
+    print(f"Warning: Could not initialize MAC vendor lookup: {e}")
+    mac_lookup = None
+    thread_pool = ThreadPoolExecutor(max_workers=4)
+
+# Common OUI mappings for quick offline lookup
+COMMON_OUIS = {
+    '00:50:56': 'VMware',
+    '00:0C:29': 'VMware',
+    '00:1B:21': 'VMware',
+    '00:05:69': 'VMware',
+    '00:03:FF': 'Microsoft',
+    '00:12:5A': 'Microsoft',
+    '00:15:5D': 'Microsoft (Hyper-V)',
+    '08:00:27': 'Oracle VirtualBox',
+    '52:54:00': 'QEMU/KVM',
+    'FC:AA:14': 'Google',
+    '00:1A:11': 'Google',
+    '00:21:6A': 'Dell',
+    '00:14:22': 'Dell',
+    '00:1D:09': 'Dell',
+    'B8:AC:6F': 'Dell',
+    '3C:A8:2A': 'Dell',
+    '00:13:72': 'Dell',
+    '00:1E:C9': 'Dell',
+    '00:26:B9': 'Dell',
+    '00:1A:A0': 'Dell',
+    '00:15:C5': 'Dell',
+    '00:11:43': 'Dell',
+    '00:90:27': 'Intel',
+    '00:02:B3': 'Intel',
+    '00:12:F0': 'Intel',
+    '00:13:02': 'Intel',
+    '00:13:20': 'Intel',
+    '00:15:17': 'Intel',
+    '00:16:E3': 'Intel',
+    '00:19:D1': 'Intel',
+    '00:1B:77': 'Intel',
+    '00:1E:67': 'Intel',
+    '00:21:70': 'Intel',
+    '00:22:FB': 'Intel',
+    '00:24:D7': 'Intel',
+    '00:26:C7': 'Intel',
+    '00:27:10': 'Intel',
+    '04:CE:14': 'Intel',
+    '08:11:96': 'Intel',
+    '0C:8B:FD': 'Intel',
+    '10:0B:A9': 'Intel',
+    '18:03:73': 'Intel',
+    '1C:87:2C': 'Intel',
+    '20:16:B9': 'Intel',
+    '24:4B:FE': 'Intel',
+    '28:D2:44': 'Intel',
+    '2C:59:E5': 'Intel',
+    '34:13:E8': 'Intel',
+    '38:2C:4A': 'Intel',
+    '3C:A9:F4': 'Intel',
+    '40:B0:34': 'Intel',
+    '44:85:00': 'Intel',
+    '48:45:20': 'Intel',
+    '4C:79:6E': 'Intel',
+    '50:46:5D': 'Intel',
+    '54:E1:AD': 'Intel',
+    '58:91:CF': 'Intel',
+    '5C:E0:C5': 'Intel',
+    '60:67:20': 'Intel',
+    '64:00:6A': 'Intel',
+    '68:05:CA': 'Intel',
+    '6C:88:14': 'Intel',
+    '70:1A:04': 'Intel',
+    '74:E5:F9': 'Intel',
+    '78:92:9C': 'Intel',
+    '7C:7A:91': 'Intel',
+    '80:19:34': 'Intel',
+    '84:3A:4B': 'Intel',
+    '88:75:56': 'Intel',
+    '8C:A9:82': 'Intel',
+    '90:E2:BA': 'Intel',
+    '94:65:9C': 'Intel',
+    '98:4F:EE': 'Intel',
+    '9C:B6:D0': 'Intel',
+    'A0:8C:FD': 'Intel',
+    'A4:4C:C8': 'Intel',
+    'A8:5E:45': 'Intel',
+    'AC:7B:A1': 'Intel',
+    'B0:35:9F': 'Intel',
+    'B4:96:91': 'Intel',
+    'B8:86:87': 'Intel',
+    'BC:77:37': 'Intel',
+    'C0:3F:D5': 'Intel',
+    'C4:34:6B': 'Intel',
+    'C8:5B:76': 'Intel',
+    'CC:2F:71': 'Intel',
+    'D0:50:99': 'Intel',
+    'D4:BE:D9': 'Intel',
+    'D8:CB:8A': 'Intel',
+    'DC:53:60': 'Intel',
+    'E0:DB:55': 'Intel',
+    'E4:B3:18': 'Intel',
+    'E8:39:35': 'Intel',
+    'EC:A8:6B': 'Intel',
+    'F0:76:1C': 'Intel',
+    'F4:4D:30': 'Intel',
+    'F8:63:3F': 'Intel',
+    'FC:AA:14': 'Intel',
+    '28:CF:E9': 'Apple',
+    '00:03:93': 'Apple',
+    '00:05:02': 'Apple',
+    '00:0A:27': 'Apple',
+    '00:0A:95': 'Apple',
+    '00:0D:93': 'Apple',
+    '00:11:24': 'Apple',
+    '00:14:51': 'Apple',
+    '00:16:CB': 'Apple',
+    '00:17:F2': 'Apple',
+    '00:19:E3': 'Apple',
+    '00:1B:63': 'Apple',
+    '00:1E:C2': 'Apple',
+    '00:21:E9': 'Apple',
+    '00:22:41': 'Apple',
+    '00:23:12': 'Apple',
+    '00:23:32': 'Apple',
+    '00:23:6C': 'Apple',
+    '00:23:DF': 'Apple',
+    '00:24:36': 'Apple',
+    '00:25:00': 'Apple',
+    '00:25:4B': 'Apple',
+    '00:25:BC': 'Apple',
+    '00:26:08': 'Apple',
+    '00:26:4A': 'Apple',
+    '00:26:B0': 'Apple',
+    '00:26:BB': 'Apple',
+    '04:0C:CE': 'Apple',
+    '04:15:52': 'Apple',
+    '04:1E:64': 'Apple',
+    '04:26:65': 'Apple',
+    '04:48:9A': 'Apple',
+    '04:4F:AA': 'Apple',
+    '04:52:C7': 'Apple',
+    '04:54:53': 'Apple',
+    '04:69:F8': 'Apple',
+    '04:DB:56': 'Apple',
+    '04:E5:36': 'Apple',
+    '04:F1:3E': 'Apple',
+    '04:F7:E4': 'Apple',
+    '08:6D:41': 'Apple',
+    '08:74:02': 'Apple',
+    '08:96:D7': 'Apple',
+    '0C:3E:9F': 'Apple',
+    '0C:4D:E9': 'Apple',
+    '0C:71:5D': 'Apple',
+    '0C:74:C2': 'Apple',
+    '0C:77:1A': 'Apple',
+    '0C:D2:92': 'Apple',
+    '10:40:F3': 'Apple',
+    '10:93:E9': 'Apple',
+    '10:DD:B1': 'Apple',
+    '14:10:9F': 'Apple',
+    '14:20:5E': 'Apple',
+    '14:5A:05': 'Apple',
+    '14:7D:DA': 'Apple',
+    '14:BD:61': 'Apple',
+    '18:20:32': 'Apple',
+    '18:34:51': 'Apple',
+    '18:65:90': 'Apple',
+    '18:AF:61': 'Apple',
+    '18:E7:F4': 'Apple',
+    '1C:1A:C0': 'Apple',
+    '1C:36:BB': 'Apple',
+    '1C:AB:A7': 'Apple',
+    '1C:E6:2B': 'Apple',
+    '20:3C:AE': 'Apple',
+    '20:A2:E4': 'Apple',
+    '20:C9:D0': 'Apple',
+    '24:A0:74': 'Apple',
+    '24:AB:81': 'Apple',
+    '24:DA:9B': 'Apple',
+    '24:F0:94': 'Apple',
+    '24:F5:AA': 'Apple',
+    '28:37:37': 'Apple',
+    '28:6A:BA': 'Apple',
+    '28:A0:2B': 'Apple',
+    '28:B2:BD': 'Apple',
+    '28:E0:2C': 'Apple',
+    '2C:1F:23': 'Apple',
+    '2C:36:F8': 'Apple',
+    '2C:4D:54': 'Apple',
+    '2C:54:CF': 'Apple',
+    '2C:5F:F3': 'Apple',
+    '2C:B4:3A': 'Apple',
+    '2C:BE:08': 'Apple',
+    '30:10:E4': 'Apple',
+    '30:35:AD': 'Apple',
+    '30:63:6B': 'Apple',
+    '30:90:AB': 'Apple',
+    '30:F7:C5': 'Apple',
+    '34:15:9E': 'Apple',
+    '34:36:3B': 'Apple',
+    '34:51:8B': 'Apple',
+    '34:A3:95': 'Apple',
+    '34:C0:59': 'Apple',
+    '34:E2:FD': 'Apple',
+    '38:0F:4A': 'Apple',
+    '38:48:4C': 'Apple',
+    '38:89:DC': 'Apple',
+    '38:B5:4D': 'Apple',
+    '38:C9:86': 'Apple',
+    '3C:15:C2': 'Apple',
+    '3C:2E:F9': 'Apple',
+    '3C:7C:3F': 'Apple',
+    '3C:A6:F6': 'Apple',
+    '40:31:3C': 'Apple',
+    '40:33:1A': 'Apple',
+    '40:4D:7F': 'Apple',
+    '40:A6:D9': 'Apple',
+    '40:B3:95': 'Apple',
+    '40:CB:C0': 'Apple',
+    '40:D3:2D': 'Apple',
+    '44:00:10': 'Apple',
+    '44:2A:60': 'Apple',
+    '44:4C:0C': 'Apple',
+    '44:D8:84': 'Apple',
+    '44:FB:42': 'Apple',
+    '48:43:7C': 'Apple',
+    '48:60:BC': 'Apple',
+    '48:74:6E': 'Apple',
+    '48:A1:95': 'Apple',
+    '48:BF:6B': 'Apple',
+    '48:D7:05': 'Apple',
+    '4C:3C:16': 'Apple',
+    '4C:7C:5F': 'Apple',
+    '4C:8D:79': 'Apple',
+    '4C:B1:99': 'Apple',
+    '50:32:37': 'Apple',
+    '50:5A:65': 'Apple',
+    '50:EA:D6': 'Apple',
+    '54:26:96': 'Apple',
+    '54:4E:90': 'Apple',
+    '54:72:4F': 'Apple',
+    '54:AE:27': 'Apple',
+    '54:E4:3A': 'Apple',
+    '58:40:4E': 'Apple',
+    '58:55:CA': 'Apple',
+    '58:B0:35': 'Apple',
+    '5C:95:AE': 'Apple',
+    '5C:96:9D': 'Apple',
+    '5C:CF:7F': 'Apple',
+    '5C:F9:38': 'Apple',
+    '60:03:08': 'Apple',
+    '60:33:4B': 'Apple',
+    '60:5B:B4': 'Apple',
+    '60:6C:66': 'Apple',
+    '60:C5:47': 'Apple',
+    '60:F4:45': 'Apple',
+    '64:20:0C': 'Apple',
+    '64:49:6F': 'Apple',
+    '64:76:BA': 'Apple',
+    '64:B0:A6': 'Apple',
+    '64:E6:82': 'Apple',
+    '68:5B:35': 'Apple',
+    '68:96:7B': 'Apple',
+    '68:AB:1E': 'Apple',
+    '68:D9:3C': 'Apple',
+    '6C:19:8F': 'Apple',
+    '6C:3E:6D': 'Apple',
+    '6C:40:08': 'Apple',
+    '6C:4D:73': 'Apple',
+    '6C:70:9F': 'Apple',
+    '6C:8D:C1': 'Apple',
+    '6C:94:66': 'Apple',
+    '6C:AD:F8': 'Apple',
+    '70:11:24': 'Apple',
+    '70:48:0F': 'Apple',
+    '70:56:81': 'Apple',
+    '70:73:CB': 'Apple',
+    '70:DE:E2': 'Apple',
+    '70:EC:E4': 'Apple',
+    '74:1B:B2': 'Apple',
+    '74:2F:68': 'Apple',
+    '74:E1:B6': 'Apple',
+    '74:E2:F5': 'Apple',
+    '78:31:C1': 'Apple',
+    '78:4F:43': 'Apple',
+    '78:7B:8A': 'Apple',
+    '78:A3:E4': 'Apple',
+    '78:CA:39': 'Apple',
+    '78:FD:94': 'Apple',
+    '7C:04:D0': 'Apple',
+    '7C:11:BE': 'Apple',
+    '7C:6D:62': 'Apple',
+    '7C:C3:A1': 'Apple',
+    '7C:D1:C3': 'Apple',
+    '7C:F0:5F': 'Apple',
+    '80:BE:05': 'Apple',
+    '80:E6:50': 'Apple',
+    '84:38:35': 'Apple',
+    '84:78:AC': 'Apple',
+    '84:FC:FE': 'Apple',
+    '88:1F:A1': 'Apple',
+    '88:53:2E': 'Apple',
+    '88:63:DF': 'Apple',
+    '88:66:5A': 'Apple',
+    '88:AE:1D': 'Apple',
+    '88:E8:7F': 'Apple',
+    '8C:29:37': 'Apple',
+    '8C:2D:AA': 'Apple',
+    '8C:7C:92': 'Apple',
+    '8C:8E:F2': 'Apple',
+    '90:27:E4': 'Apple',
+    '90:72:40': 'Apple',
+    '90:B0:ED': 'Apple',
+    '90:B2:1F': 'Apple',
+    '94:E9:6A': 'Apple',
+    '94:F6:A3': 'Apple',
+    '98:03:9B': 'Apple',
+    '98:0D:2E': 'Apple',
+    '98:B8:E3': 'Apple',
+    '98:FE:94': 'Apple',
+    '9C:04:EB': 'Apple',
+    '9C:20:7B': 'Apple',
+    '9C:84:BF': 'Apple',
+    '9C:93:4E': 'Apple',
+    '9C:F3:87': 'Apple',
+    'A0:99:9B': 'Apple',
+    'A0:C5:89': 'Apple',
+    'A0:D7:95': 'Apple',
+    'A4:5E:60': 'Apple',
+    'A4:83:E7': 'Apple',
+    'A4:B1:97': 'Apple',
+    'A4:C3:61': 'Apple',
+    'A8:20:66': 'Apple',
+    'A8:51:AB': 'Apple',
+    'A8:60:B6': 'Apple',
+    'A8:86:DD': 'Apple',
+    'A8:88:08': 'Apple',
+    'A8:96:75': 'Apple',
+    'A8:BB:CF': 'Apple',
+    'A8:FA:D8': 'Apple',
+    'AC:1F:74': 'Apple',
+    'AC:29:3A': 'Apple',
+    'AC:3C:0B': 'Apple',
+    'AC:61:EA': 'Apple',
+    'AC:87:A3': 'Apple',
+    'AC:BC:32': 'Apple',
+    'AC:CF:23': 'Apple',
+    'AC:F7:F3': 'Apple',
+    'B0:09:DA': 'Apple',
+    'B0:34:95': 'Apple',
+    'B0:48:7A': 'Apple',
+    'B0:65:BD': 'Apple',
+    'B0:CA:68': 'Apple',
+    'B4:18:D1': 'Apple',
+    'B4:8B:19': 'Apple',
+    'B4:9C:DF': 'Apple',
+    'B4:F0:AB': 'Apple',
+    'B4:F6:1C': 'Apple',
+    'B8:09:8A': 'Apple',
+    'B8:17:C2': 'Apple',
+    'B8:27:EB': 'Apple',
+    'B8:53:AC': 'Apple',
+    'B8:63:BC': 'Apple',
+    'B8:78:26': 'Apple',
+    'B8:8D:12': 'Apple',
+    'B8:C7:5D': 'Apple',
+    'B8:E8:56': 'Apple',
+    'B8:F6:B1': 'Apple',
+    'B8:FF:61': 'Apple',
+    'BC:3B:AF': 'Apple',
+    'BC:52:B7': 'Apple',
+    'BC:67:1C': 'Apple',
+    'BC:6C:21': 'Apple',
+    'BC:92:6B': 'Apple',
+    'BC:9F:EF': 'Apple',
+    'BC:F5:AC': 'Apple',
+    'C0:25:5C': 'Apple',
+    'C0:6B:8E': 'Apple',
+    'C0:7C:D1': 'Apple',
+    'C0:CE:CD': 'Apple',
+    'C0:D0:12': 'Apple',
+    'C4:2C:03': 'Apple',
+    'C4:B3:01': 'Apple',
+    'C8:21:58': 'Apple',
+    'C8:2A:14': 'Apple',
+    'C8:33:4B': 'Apple',
+    'C8:69:CD': 'Apple',
+    'C8:BC:C8': 'Apple',
+    'C8:E0:EB': 'Apple',
+    'C8:F6:50': 'Apple',
+    'CC:08:8D': 'Apple',
+    'CC:20:E8': 'Apple',
+    'CC:25:EF': 'Apple',
+    'CC:29:F5': 'Apple',
+    'CC:2D:8C': 'Apple',
+    'CC:78:AB': 'Apple',
+    'CC:C7:60': 'Apple',
+    'D0:03:4B': 'Apple',
+    'D0:23:DB': 'Apple',
+    'D0:33:11': 'Apple',
+    'D0:81:7A': 'Apple',
+    'D0:A6:37': 'Apple',
+    'D4:61:DA': 'Apple',
+    'D4:9A:20': 'Apple',
+    'D4:DC:CD': 'Apple',
+    'D4:F4:6F': 'Apple',
+    'D8:1D:72': 'Apple',
+    'D8:30:62': 'Apple',
+    'D8:96:95': 'Apple',
+    'D8:A2:5E': 'Apple',
+    'D8:BB:2C': 'Apple',
+    'DC:0C:5C': 'Apple',
+    'DC:2B:2A': 'Apple',
+    'DC:37:45': 'Apple',
+    'DC:3E:51': 'Apple',
+    'DC:56:E7': 'Apple',
+    'DC:86:D8': 'Apple',
+    'DC:A4:CA': 'Apple',
+    'DC:A9:04': 'Apple',
+    'DC:B4:C4': 'Apple',
+    'DC:F8:56': 'Apple',
+    'E0:33:8E': 'Apple',
+    'E0:88:5D': 'Apple',
+    'E0:AC:CB': 'Apple',
+    'E0:B5:2D': 'Apple',
+    'E0:C9:7A': 'Apple',
+    'E0:F8:47': 'Apple',
+    'E4:8B:7F': 'Apple',
+    'E4:C6:3D': 'Apple',
+    'E4:CE:8F': 'Apple',
+    'E8:04:0B': 'Apple',
+    'E8:06:88': 'Apple',
+    'E8:2A:EA': 'Apple',
+    'E8:40:F2': 'Apple',
+    'E8:80:2E': 'Apple',
+    'E8:B2:AC': 'Apple',
+    'EC:35:86': 'Apple',
+    'EC:8A:4C': 'Apple',
+    'F0:18:98': 'Apple',
+    'F0:1D:BC': 'Apple',
+    'F0:2F:74': 'Apple',
+    'F0:61:9D': 'Apple',
+    'F0:98:9D': 'Apple',
+    'F0:B4:79': 'Apple',
+    'F0:C1:F1': 'Apple',
+    'F0:CB:A1': 'Apple',
+    'F0:DB:E2': 'Apple',
+    'F0:DC:E2': 'Apple',
+    'F0:E5:7B': 'Apple',
+    'F4:0F:24': 'Apple',
+    'F4:31:C3': 'Apple',
+    'F4:37:B7': 'Apple',
+    'F4:5C:89': 'Apple',
+    'F4:7F:35': 'Apple',
+    'F4:8E:38': 'Apple',
+    'F4:F1:5A': 'Apple',
+    'F4:F9:51': 'Apple',
+    'F8:01:13': 'Apple',
+    'F8:1E:DF': 'Apple',
+    'F8:2D:7C': 'Apple',
+    'F8:4F:AD': 'Apple',
+    'F8:A9:D0': 'Apple',
+    'F8:E9:4E': 'Apple',
+    'F8:F2:1E': 'Apple',
+    'FC:25:3F': 'Apple',
+    'FC:E9:98': 'Apple',
+    '00:50:F2': 'Samsung',
+    '00:12:FB': 'Samsung',
+    '00:13:77': 'Samsung',
+    '00:15:99': 'Samsung',
+    '00:16:32': 'Samsung',
+    '00:17:C9': 'Samsung',
+    '00:1B:98': 'Samsung',
+    '00:1C:43': 'Samsung',
+    '00:1D:25': 'Samsung',
+    '00:1E:7D': 'Samsung',
+    '00:1F:CC': 'Samsung',
+    '00:21:19': 'Samsung',
+    '00:23:39': 'Samsung',
+    '00:24:54': 'Samsung',
+    '00:26:37': 'Samsung',
+    '04:18:D6': 'Samsung',
+    '04:FE:7F': 'Samsung',
+    '08:08:C2': 'Samsung',
+    '08:37:3D': 'Samsung',
+    '08:EC:A9': 'Samsung',
+    '0C:14:20': 'Samsung',
+    '0C:89:10': 'Samsung',
+    '10:1D:C0': 'Samsung',
+    '10:30:47': 'Samsung',
+    '10:77:B1': 'Samsung',
+    '10:BD:18': 'Samsung',
+    '14:13:33': 'Samsung',
+    '14:49:E0': 'Samsung',
+    '14:7F:D2': 'Samsung',
+    '14:A5:1A': 'Samsung',
+    '18:22:7E': 'Samsung',
+    '18:3A:2D': 'Samsung',
+    '18:44:4F': 'Samsung',
+    '18:4F:32': 'Samsung',
+    '18:5E:0F': 'Samsung',
+    '18:68:CB': 'Samsung',
+    '18:CF:5E': 'Samsung',
+    '1C:5A:3E': 'Samsung',
+    '1C:62:B8': 'Samsung',
+    '20:13:E0': 'Samsung',
+    '20:64:32': 'Samsung',
+    '24:4B:81': 'Samsung',
+    '24:5A:2C': 'Samsung',
+    '28:39:5E': 'Samsung',
+    '28:E3:47': 'Samsung',
+    '2C:44:01': 'Samsung',
+    '2C:8A:72': 'Samsung',
+    '2C:3B:70': 'Samsung', 
+    '30:07:4D': 'Samsung',
+    '30:19:66': 'Samsung',
+    '30:85:A9': 'Samsung',
+    '34:AA:8B': 'Samsung',
+    '34:BE:00': 'Samsung',
+    '34:E8:94': 'Samsung',
+    '38:AA:3C': 'Samsung',
+    '38:E7:D8': 'Samsung',
+    '3C:5A:B4': 'Samsung',
+    '3C:8B:FE': 'Samsung',
+    '40:0E:85': 'Samsung',
+    '40:4E:36': 'Samsung',
+    '40:B8:9A': 'Samsung',
+    '44:5E:F3': 'Samsung',
+    '44:D8:8A': 'Samsung',
+    '48:5A:3F': 'Samsung',
+    '4C:3C:16': 'Samsung',
+    '4C:66:41': 'Samsung',
+    '4C:BC:A5': 'Samsung',
+    '50:01:BB': 'Samsung',
+    '50:32:75': 'Samsung',
+    '50:CC:F8': 'Samsung',
+    '54:88:0E': 'Samsung',
+    '58:50:E6': 'Samsung',
+    '5C:0A:5B': 'Samsung',
+    '5C:51:88': 'Samsung',
+    '5C:F6:DC': 'Samsung',
+    '60:21:C0': 'Samsung',
+    '60:A1:0A': 'Samsung',
+    '68:EB:C5': 'Samsung',
+    '6C:2F:2C': 'Samsung',
+    '6C:83:36': 'Samsung',
+    '78:1F:DB': 'Samsung',
+    '78:25:AD': 'Samsung',
+    '78:47:1D': 'Samsung',
+    '78:52:1A': 'Samsung',
+    '78:59:5E': 'Samsung',
+    '78:67:D5': 'Samsung',
+    '78:D6:F0': 'Samsung',
+    '7C:61:93': 'Samsung',
+    '7C:A2:3E': 'Samsung',
+    '80:57:19': 'Samsung',
+    '80:7A:BF': 'Samsung',
+    '84:25:3F': 'Samsung',
+    '84:38:38': 'Samsung',
+    '84:A4:66': 'Samsung',
+    '88:32:9B': 'Samsung',
+    '8C:77:12': 'Samsung',
+    '90:18:7C': 'Samsung',
+    '94:35:0A': 'Samsung',
+    '94:44:44': 'Samsung',
+    '9C:02:98': 'Samsung',
+    '9C:3A:AF': 'Samsung',
+    '9C:65:B0': 'Samsung',
+    'A0:0B:BA': 'Samsung',
+    'A0:75:91': 'Samsung',
+    'A0:82:1F': 'Samsung',
+    'A0:AF:BD': 'Samsung',
+    'A4:14:37': 'Samsung',
+    'A4:EB:D3': 'Samsung',
+    'A8:F2:74': 'Samsung',
+    'AC:5F:3E': 'Samsung',
+    'B0:EC:71': 'Samsung',
+    'B4:62:93': 'Samsung',
+    'B4:74:9F': 'Samsung',
+    'B8:5A:F7': 'Samsung',
+    'BC:20:A4': 'Samsung',
+    'BC:72:B1': 'Samsung',
+    'BC:85:1F': 'Samsung',
+    'BC:F5:AC': 'Samsung',
+    'C0:BD:D1': 'Samsung',
+    'C4:57:6E': 'Samsung',
+    'C8:1E:E7': 'Samsung',
+    'C8:3A:35': 'Samsung',
+    'C8:BA:94': 'Samsung',
+    'CC:07:AB': 'Samsung',
+    'D0:17:C2': 'Samsung',
+    'D0:22:BE': 'Samsung',
+    'D0:59:E4': 'Samsung',
+    'D4:87:D8': 'Samsung',
+    'D4:E8:B2': 'Samsung',
+    'D8:31:CF': 'Samsung',
+    'D8:90:E8': 'Samsung',
+    'DC:71:96': 'Samsung',
+    'E0:91:F5': 'Samsung',
+    'E4:40:E2': 'Samsung',
+    'E8:50:8B': 'Samsung',
+    'E8:E5:D6': 'Samsung',
+    'EC:1F:72': 'Samsung',
+    'EC:9B:F3': 'Samsung',
+    'F0:25:B7': 'Samsung',
+    'F4:0E:01': 'Samsung',
+    'F4:73:35': 'Samsung',
+    'F4:7B:5E': 'Samsung',
+    'F8:04:2E': 'Samsung',
+    'F8:16:54': 'Samsung',
+    'F8:A9:D0': 'Samsung',
+    'FC:00:12': 'Samsung',
+    'FC:A1:3E': 'Samsung',
+    'FC:C2:DE': 'Samsung'
+}
+
+class VendorLookupService:
+    """Background service for vendor lookups to avoid blocking the main event loop"""
+    
+    def __init__(self):
+        self.lookup_queue = queue.Queue()
+        self.result_callbacks = {}
+        self.running = False
+        self.worker_thread = None
+        self.mac_lookup = None
+        
+        # Initialize MAC lookup in this thread
+        try:
+            self.mac_lookup = MacLookup()
+            self.mac_lookup.update_vendors()
+            print("Vendor lookup service initialized successfully")
+        except Exception as e:
+            print(f"Warning: Could not initialize MAC vendor lookup in service: {e}")
+    
+    def start(self):
+        """Start the background vendor lookup service"""
+        self.running = True
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
+        print("Vendor lookup service started")
+    
+    def stop(self):
+        """Stop the background vendor lookup service"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+    
+    def lookup_vendor_async(self, mac: str, callback=None) -> str:
+        """Queue a vendor lookup request"""
+        request_id = f"{mac}_{time.time()}"
+        if callback:
+            self.result_callbacks[request_id] = callback
+        
+        self.lookup_queue.put({
+            'id': request_id,
+            'mac': mac,
+            'has_callback': callback is not None
+        })
+        return request_id
+    
+    def _worker_loop(self):
+        """Main worker loop for processing vendor lookups"""
+        while self.running:
+            try:
+                # Get request from queue with timeout
+                request = self.lookup_queue.get(timeout=1)
+                
+                mac = request['mac']
+                request_id = request['id']
+                
+                # Perform the lookup
+                vendor, device_type = self._perform_lookup(mac)
+                
+                # Call callback if provided
+                if request['has_callback'] and request_id in self.result_callbacks:
+                    try:
+                        self.result_callbacks[request_id](mac, vendor, device_type)
+                        del self.result_callbacks[request_id]
+                    except Exception as e:
+                        print(f"Error in vendor lookup callback: {e}")
+                
+                self.lookup_queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in vendor lookup worker: {e}")
+    
+    def _perform_lookup(self, mac: str) -> tuple:
+        """Perform the actual vendor lookup"""
+        vendor_name = "Unknown"
+        device_type = "Unknown"
+        
+        try:
+            # Ensure MAC format is consistent
+            clean_mac = mac.replace('-', ':').upper()
+            
+            # Try primary lookup first
+            if self.mac_lookup is not None:
+                try:
+                    vendor_name = str(self.mac_lookup.lookup(clean_mac))
+                    print(f"Vendor service found: {clean_mac} -> {vendor_name}")
+                except Exception as e:
+                    print(f"Primary lookup failed for {clean_mac}: {e}")
+            
+            # If primary failed, try fallback methods
+            if vendor_name == "Unknown":
+                vendor_name = self._oui_fallback_lookup(clean_mac)
+            
+            # Determine device type based on vendor patterns
+            if vendor_name != "Unknown":
+                vendor_name_lower = vendor_name.lower()
+                for type_name, patterns in DEVICE_PATTERNS.items():
+                    if any(pattern in vendor_name_lower for pattern in patterns):
+                        device_type = type_name
+                        break
+            
+            return vendor_name, device_type
+            
+        except Exception as e:
+            print(f"Error in vendor lookup for {mac}: {e}")
+            return "Unknown", "Unknown"
+    
+    def _oui_fallback_lookup(self, mac: str) -> str:
+        """Fallback OUI vendor lookup"""
+        try:
+            # First try common OUI database
+            oui = mac.replace(':', '').replace('-', '').replace('.', '').upper()[:6]
+            formatted_oui = f"{oui[:2]}:{oui[2:4]}:{oui[4:6]}"
+            
+            if formatted_oui in COMMON_OUIS:
+                print(f"Found vendor in common OUI database: {COMMON_OUIS[formatted_oui]}")
+                return COMMON_OUIS[formatted_oui]
+            
+            # Try online API with timeout
+            try:
+                response = requests.get(f"https://api.macvendors.com/{mac}", timeout=2)
+                if response.status_code == 200:
+                    vendor = response.text.strip()
+                    if vendor and not vendor.lower().startswith('not found') and vendor != "N/A":
+                        print(f"Found vendor via API: {vendor}")
+                        return vendor
+            except Exception:
+                pass  # Silently fail and continue
+            
+        except Exception as e:
+            print(f"OUI fallback lookup failed for {mac}: {e}")
+        
+        return "Unknown"
+
+# Initialize the vendor lookup service
+vendor_service = VendorLookupService()
+
 try:
     mac_lookup.update_vendors()
 except Exception as e:
@@ -124,23 +882,82 @@ PORT_SIGNATURES = {
     }
 }
 
-def get_vendor_info_sync(mac: str) -> tuple:
-    """Get vendor information from MAC address synchronously"""
+def get_oui_vendor_fallback(mac: str) -> str:
+    """Fallback OUI vendor lookup using multiple methods"""
     try:
-        vendor_name = mac_lookup.lookup(mac)
-        vendor_name_lower = vendor_name.lower()
+        # First try common OUI database
+        oui = mac.replace(':', '').replace('-', '').replace('.', '').upper()[:6]
+        formatted_oui = f"{oui[:2]}:{oui[2:4]}:{oui[4:6]}"
+        
+        if formatted_oui in COMMON_OUIS:
+            print(f"Found vendor in common OUI database: {COMMON_OUIS[formatted_oui]}")
+            return COMMON_OUIS[formatted_oui]
+        
+        # Try online API as second fallback (with reduced timeout)
+        try:
+            response = requests.get(f"https://api.macvendors.com/{mac}", timeout=2)
+            if response.status_code == 200:
+                vendor = response.text.strip()
+                if vendor and not vendor.lower().startswith('not found') and vendor != "N/A":
+                    print(f"Found vendor via API: {vendor}")
+                    return vendor
+        except Exception as api_error:
+            print(f"API lookup failed: {api_error}")
+        
+        # Try IEEE OUI database as third fallback
+        response = requests.get(f"http://standards-oui.ieee.org/oui.txt", timeout=5)
+        if response.status_code == 200:
+            oui_data = response.text
+            # Search for the OUI in the file
+            for line in oui_data.split('\n'):
+                if oui.upper() in line and '(hex)' in line:
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        return parts[2].strip()
+        
+    except Exception as e:
+        print(f"OUI fallback lookup failed for {mac}: {e}")
+    
+    return "Unknown"
+
+def get_vendor_info_sync(mac: str) -> tuple:
+    """Get vendor information from MAC address synchronously with multiple fallbacks"""
+    vendor_name = "Unknown"
+    device_type = "Unknown"
+    
+    try:
+        # Ensure MAC format is consistent
+        clean_mac = mac.replace('-', ':').upper()
+        
+        # Quick check in common OUI database first (fastest)
+        oui = clean_mac.replace(':', '').replace('-', '').replace('.', '').upper()[:6]
+        formatted_oui = f"{oui[:2]}:{oui[2:4]}:{oui[4:6]}"
+        
+        if formatted_oui in COMMON_OUIS:
+            vendor_name = COMMON_OUIS[formatted_oui]
+            print(f"Found vendor in common OUI database: {vendor_name}")
+        else:
+            # For unknown vendors, just return Unknown immediately to avoid blocking
+            # The vendor service will handle the lookup in background
+            print(f"Vendor not in common database for {clean_mac}, will be looked up in background")
         
         # Determine device type based on vendor patterns
-        device_type = "Unknown"
-        for type_name, patterns in DEVICE_PATTERNS.items():
-            if any(pattern in vendor_name_lower for pattern in patterns):
-                device_type = type_name
-                break
-                
+        if vendor_name != "Unknown":
+            vendor_name_lower = vendor_name.lower()
+            for type_name, patterns in DEVICE_PATTERNS.items():
+                if any(pattern in vendor_name_lower for pattern in patterns):
+                    device_type = type_name
+                    break
+        
         return vendor_name, device_type
+        
     except Exception as e:
-        print(f"Error looking up vendor for MAC {mac}: {e}")
+        print(f"Error in get_vendor_info_sync for {mac}: {e}")
         return "Unknown", "Unknown"
+
+def request_vendor_lookup_async(mac: str, update_callback=None):
+    """Request an async vendor lookup that won't block the main thread"""
+    return vendor_service.lookup_vendor_async(mac, update_callback)
 
 def analyze_ttl(ttl: int) -> str:
     """Analyze TTL value to guess OS/device type"""
@@ -225,40 +1042,41 @@ def identify_device_type_threaded(mac: str, hostname: str, ports: set, ip: str =
         print(f"Error in identify_device_type for MAC {mac}: {e}")
         return "Unknown", "Unknown"
 
-async def identify_device_type(mac: str, hostname: str, ports: set, ip: str = None) -> tuple:
-    """Enhanced device type identification using multiple methods and active probing"""
+def identify_device_type_sync(mac: str, hostname: str, ports: set, ip: str = None) -> tuple:
+    """Synchronous device type identification - safe for any context"""
     try:
-        # Start with vendor lookup
-        vendor, initial_type = get_vendor_info_sync(mac)
+        # Use only sync vendor lookup
+        vendor, device_type = get_vendor_info_sync(mac)
         
-        if ip:
-            # Actively probe the device
-            print(f"Probing device {ip} ({mac})")
-            device_info = await probe_device(ip, mac)
-            
-            # Get confidence scores for each device type
-            if device_info['is_up']:
-                all_ports = ports.union(device_info['open_ports'])
-                device_scores = calculate_device_type_confidence(device_info, all_ports)
-                
-                # If we have a high confidence score, use that device type
-                if device_scores and device_scores[0][1] >= 0.7:
-                    return vendor, device_scores[0][0]
-                
-                # If initial type matches one of top 3 scores, keep it
-                top_types = [score[0] for score in device_scores[:3]]
-                if initial_type in top_types:
-                    return vendor, initial_type
-                
-                # Otherwise use the highest confidence type
-                if device_scores:
-                    return vendor, device_scores[0][0]
+        # If device type is still unknown, try other methods
+        if device_type == "Unknown":
+            # Check hostname patterns
+            hostname_lower = hostname.lower()
+            for type_name, patterns in DEVICE_PATTERNS.items():
+                if any(pattern in hostname_lower for pattern in patterns):
+                    device_type = type_name
+                    break
         
-        # Fallback to initial type or Unknown
-        return vendor, initial_type if initial_type != "Unknown" else "Computer"
+        # If still unknown and we have ports, check port patterns
+        if device_type == "Unknown" and ports:
+            for type_name, device_ports in DEVICE_PORTS.items():
+                if any(port in ports for port in device_ports):
+                    device_type = type_name
+                    break
+        
+        # Additional heuristics based on port characteristics
+        if device_type == "Unknown":
+            if any(port in ports for port in [62078, 5353]):  # iOS/Android ports
+                device_type = "Mobile Device"
+            elif len(ports) < 5 and all(port in [80, 443, 8080, 1883, 8883] for port in ports):
+                device_type = "IoT Device"
+            elif len(ports) > 10 and any(port in [22, 445, 139] for port in ports):
+                device_type = "Computer"
+        
+        return vendor, device_type
         
     except Exception as e:
-        print(f"Error in identify_device_type for MAC {mac}: {e}")
+        print(f"Error in identify_device_type_sync for MAC {mac}: {e}")
         return "Unknown", "Unknown"
 
 app = FastAPI(title="NetSentinel API")
@@ -552,9 +1370,21 @@ def update_device_info(ip: str, mac: str, skip_vendor_lookup: bool = False):
             }
             
             if not skip_vendor_lookup:
+                # Quick sync lookup for common vendors
                 vendor, device_type = get_vendor_info_sync(mac)
                 device_history[mac]['vendor'] = vendor
                 device_history[mac]['device_type'] = device_type
+                
+                # If vendor is still unknown, queue a background lookup
+                if vendor == "Unknown":
+                    def vendor_update_callback(mac_addr, found_vendor, found_device_type):
+                        """Callback to update device when vendor is found"""
+                        if mac_addr in device_history:
+                            device_history[mac_addr]['vendor'] = found_vendor
+                            device_history[mac_addr]['device_type'] = found_device_type
+                            print(f"Background vendor lookup completed: {mac_addr} -> {found_vendor} ({found_device_type})")
+                    
+                    request_vendor_lookup_async(mac, vendor_update_callback)
                 
         else:
             device = device_history[mac]
@@ -788,20 +1618,21 @@ async def scan_network():
         print("Processing captured packets...")
         await asyncio.sleep(2)
         
-        # After scan is complete, perform vendor lookup for all devices
+        # After scan is complete, queue vendor lookups for all devices with unknown vendors
         if not stop_scan_event.is_set():
-            print("Performing vendor lookups...")
+            print("Queuing background vendor lookups...")
             for mac in list(device_history.keys()):
-                try:
-                    vendor, device_type = identify_device_type(
-                        mac,
-                        device_history[mac]['hostname'],
-                        device_history[mac].get('ports', set())
-                    )
-                    device_history[mac]['vendor'] = vendor
-                    device_history[mac]['device_type'] = device_type
-                except Exception as e:
-                    print(f"Error looking up vendor for {mac}: {e}")
+                device = device_history[mac]
+                if device['vendor'] == "Unknown":
+                    def create_callback(device_mac):
+                        def vendor_callback(mac_addr, found_vendor, found_device_type):
+                            if mac_addr in device_history:
+                                device_history[mac_addr]['vendor'] = found_vendor
+                                device_history[mac_addr]['device_type'] = found_device_type
+                                print(f"Scan vendor lookup complete: {mac_addr} -> {found_vendor}")
+                        return vendor_callback
+                    
+                    request_vendor_lookup_async(mac, create_callback(mac))
         
         # Convert device history to list and return
         devices = list(device_history.values())
@@ -822,6 +1653,19 @@ async def notify_clients_alerts(alerts):
             })
         except:
             continue
+
+async def notify_device_update(device_mac: str):
+    """Notify all connected clients of device updates"""
+    if device_mac in device_history:
+        device = device_history[device_mac]
+        for client in connected_clients:
+            try:
+                await client.send_json({
+                    'type': 'device_info',
+                    'data': device
+                })
+            except:
+                continue
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -929,20 +1773,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"Device info requested for MAC: {device_mac}")
                     if device_mac in device_history and websocket in connected_clients:
                         device = device_history[device_mac]
-                        # Perform vendor lookup when device info is requested
+                        
+                        # If vendor is unknown, queue a background lookup
                         if device['vendor'] == "Unknown" or device['device_type'] == "Unknown":
-                            try:
-                                print(f"Starting vendor lookup for MAC: {device_mac}")
-                                vendor, device_type = await identify_device_type(
-                                    device_mac,
-                                    device['hostname'],
-                                    device.get('ports', set())
-                                )
-                                device['vendor'] = vendor
-                                device['device_type'] = device_type
-                                print(f"Updated device info - Vendor: {vendor}, Type: {device_type}")
-                            except Exception as e:
-                                print(f"Error updating device info: {e}")
+                            print(f"Starting background vendor lookup for MAC: {device_mac}")
+                            
+                            def vendor_callback(mac_addr, found_vendor, found_device_type):
+                                """Callback to send updated device info to client"""
+                                if mac_addr in device_history:
+                                    device_history[mac_addr]['vendor'] = found_vendor
+                                    device_history[mac_addr]['device_type'] = found_device_type
+                                    print(f"Background lookup complete - Vendor: {found_vendor}, Type: {found_device_type}")
+                                    
+                                    # Send updated info to all connected clients
+                                    asyncio.create_task(notify_device_update(mac_addr))
+                            
+                            request_vendor_lookup_async(device_mac, vendor_callback)
                         
                         await websocket.send_json({
                             'type': 'device_info',
@@ -1129,5 +1975,14 @@ def calculate_device_type_confidence(device_info: dict, ports: set) -> List[Tupl
     return sorted(scores, key=lambda x: x[1], reverse=True)
 
 if __name__ == "__main__":
+    # Start the vendor lookup service
+    vendor_service.start()
+    print("NetSentinel starting...")
+    
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    finally:
+        # Stop the vendor service when shutting down
+        vendor_service.stop()
+        print("NetSentinel shutdown complete.") 
