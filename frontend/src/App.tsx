@@ -5,6 +5,7 @@ import NetworkMap from './components/NetworkMap';
 import DeviceList from './components/DeviceList';
 import AlertPanel from './components/AlertPanel';
 import Layout from './components/Layout';
+import FileScanner from './components/FileScanner';
 import './App.css';
 
 function App() {
@@ -134,6 +135,9 @@ function App() {
           <div className="bg-gray-800 rounded-lg shadow-lg p-4">
             <h2 className="text-xl font-semibold mb-4">Security Alerts</h2>
             <AlertPanel devices={devices} />
+            <div className="mt-4">
+              <FileScanner />
+            </div>
           </div>
         </div>
 

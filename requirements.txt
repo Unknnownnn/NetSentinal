@@ -11,4 +11,7 @@ mac-vendor-lookup
 netifaces
 requests
 websockets
-mac-vendor-lookup
+pytest
+pytest-cov
+httpx
+requests-mock

@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Dict, List, Tuple
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 import nmap
@@ -14,8 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import platform
 import re
-import winreg
+try:
+    import winreg  # type: ignore
+except Exception:
+    winreg = None  # Non-Windows platforms don't have winreg
 import requests
+import hashlib
+import base64
 import websockets
 import time
 
@@ -23,9 +28,9 @@ from oui_database import get_vendor_from_oui, get_device_type_from_vendor
 from security_monitor import SecurityMonitor, NetworkDefense, VulnerabilityScanner
 from config import get_config, update_config, SECURITY_CONFIG, DEFENSE_CONFIG, API_CONFIG
 from pathlib import Path
-from mac_vendor_lookup import MacLookup
 import queue
 import threading
+from file_scanner import scanner as vt_scanner, VirusTotalScanner
 
 # Import OUI database
 from oui_database import get_vendor_from_oui, get_device_type_from_vendor, DEVICE_TYPE_PATTERNS
@@ -33,18 +38,8 @@ from oui_database import get_vendor_from_oui, get_device_type_from_vendor, DEVIC
 # Import security monitoring
 from security_monitor import security_monitor, network_defense, vulnerability_scanner
 
-# Initialize MAC lookup and thread pool
-try:
-    mac_lookup = MacLookup()
-    thread_pool = ThreadPoolExecutor(max_workers=4)
-    try:
-        mac_lookup.update_vendors()
-    except Exception as e:
-        print(f"Warning: Could not update MAC vendor database: {e}")
-except Exception as e:
-    print(f"Warning: Could not initialize MAC vendor lookup: {e}")
-    mac_lookup = None
-    thread_pool = ThreadPoolExecutor(max_workers=4)
+# Initialize thread pool
+thread_pool = ThreadPoolExecutor(max_workers=4)
 
 # Global WebSocket state
 websocket_server_active = False
@@ -58,15 +53,7 @@ class VendorLookupService:
         self.result_callbacks = {}
         self.running = False
         self.worker_thread = None
-        self.mac_lookup = None
-        
-        # Initialize MAC lookup in this thread
-        try:
-            self.mac_lookup = MacLookup()
-            self.mac_lookup.update_vendors()
-            print("Vendor lookup service initialized successfully")
-        except Exception as e:
-            print(f"Warning: Could not initialize MAC vendor lookup in service: {e}")
+        print("Vendor lookup service initialized successfully")
     
     def start(self):
         """Start the background vendor lookup service"""
@@ -131,17 +118,8 @@ class VendorLookupService:
             # Ensure MAC format is consistent
             clean_mac = mac.replace('-', ':').upper()
             
-            # Try primary lookup first
-            if self.mac_lookup is not None:
-                try:
-                    vendor_name = str(self.mac_lookup.lookup(clean_mac))
-                    print(f"Vendor service found: {clean_mac} -> {vendor_name}")
-                except Exception as e:
-                    print(f"Primary lookup failed for {clean_mac}: {e}")
-            
-            # If primary failed, try fallback methods
-            if vendor_name == "Unknown":
-                vendor_name = self._oui_fallback_lookup(clean_mac)
+            # Use our improved OUI lookup methods
+            vendor_name = self._oui_fallback_lookup(clean_mac)
             
             # Determine device type based on vendor patterns
             if vendor_name != "Unknown":
@@ -184,11 +162,6 @@ class VendorLookupService:
 
 # Initialize the vendor lookup service
 vendor_service = VendorLookupService()
-
-try:
-    mac_lookup.update_vendors()
-except Exception as e:
-    print(f"Warning: Could not update MAC vendor database: {e}")
 
 # Common ports for device identification
 DEVICE_PORTS = {
@@ -787,26 +760,36 @@ def schedule_alert_notification(alerts):
     """Schedule alert notification safely"""
     global websocket_server_active
     
-    print(f"schedule_alert_notification called: server_active={websocket_server_active}, clients={len(connected_clients)}")
-    
     # Don't try to send if no WebSocket server is active
     if not websocket_server_active or not connected_clients:
-        print("Skipping WebSocket notification - no active server or clients")
         return
         
     try:
         # Try to get the current event loop
         try:
             loop = asyncio.get_running_loop()
-            print("Creating WebSocket notification task")
-            # Event loop is running, create task
-            asyncio.create_task(notify_clients_alerts(alerts))
+            # Verify we have valid WebSocket connections before creating task
+            if connected_clients:
+                # Check if any clients are still connected
+                valid_clients = []
+                for client in connected_clients:
+                    try:
+                        # Only include clients that appear to be properly connected
+                        if hasattr(client, 'client_state') and client.client_state.name == 'CONNECTED':
+                            valid_clients.append(client)
+                    except:
+                        pass
+                
+                if valid_clients:
+                    # Event loop is running and we have valid clients, create task
+                    asyncio.create_task(notify_clients_alerts(alerts))
         except RuntimeError:
-            # No event loop running, skip WebSocket notifications
-            print("No running event loop for WebSocket notifications")
+            # No event loop running, skip WebSocket notifications silently
+            pass
             
     except Exception as e:
-        print(f"Error scheduling alert notification: {e}")
+        # Silently handle WebSocket errors to prevent spam
+        pass
 
 def schedule_device_notification(device_mac: str):
     """Schedule device update notification safely"""
@@ -820,21 +803,28 @@ def schedule_device_notification(device_mac: str):
         # Try to get the current event loop
         try:
             loop = asyncio.get_running_loop()
-            # Event loop is running, create task
-            asyncio.create_task(notify_device_update(device_mac))
+            # Verify we have valid WebSocket connections before creating task
+            if connected_clients:
+                # Check if any clients are still connected
+                valid_clients = []
+                for client in connected_clients:
+                    try:
+                        # Only include clients that appear to be properly connected
+                        if hasattr(client, 'client_state') and client.client_state.name == 'CONNECTED':
+                            valid_clients.append(client)
+                    except:
+                        pass
+                
+                if valid_clients:
+                    # Event loop is running and we have valid clients, create task
+                    asyncio.create_task(notify_device_update(device_mac))
         except RuntimeError:
-            # No event loop running, skip WebSocket notifications
-            print("No running event loop for WebSocket notifications")
+            # No event loop running, skip WebSocket notifications silently
+            pass
             
     except Exception as e:
-        print(f"Error scheduling device notification: {e}")
-        # No event loop running, we can't send WebSocket notifications
-        print("No event loop available for WebSocket notifications")
-    except Exception as e:
-        print(f"Error scheduling device notification: {e}")
-                
-    except Exception as e:
-        print(f"Error updating device info: {str(e)}")
+        # Silently handle WebSocket errors to prevent spam
+        pass
 
 def get_service_name(port: int) -> str:
     """Get service name for common ports"""
@@ -1105,22 +1095,33 @@ async def notify_clients_alerts(alerts):
 async def notify_device_update(device_mac: str):
     """Notify all connected clients of device updates"""
     if device_mac not in device_history:
+        print(f"Device {device_mac} not found in history")
         return
         
     if not connected_clients:
+        print("No connected clients for device update")
         return
         
     device = device_history[device_mac]
     disconnected_clients = []
+    
+    print(f"Sending device update for {device_mac} to {len(connected_clients)} clients")
+    
     for client in list(connected_clients):  # Create a copy to avoid modification during iteration
         try:
-            # Simply try to send and catch any exceptions
+            # Check if WebSocket is still open before sending
+            if hasattr(client, 'client_state') and client.client_state.name != 'CONNECTED':
+                print(f"WebSocket client not connected (state: {client.client_state.name}), marking for removal")
+                disconnected_clients.append(client)
+                continue
+                
             await client.send_json({
                 'type': 'device_info',
                 'data': device
             })
+            print(f"Successfully sent device update for {device_mac}")
         except Exception as e:
-            print(f"Error sending device update to client: {e}")
+            print(f"Error sending device update to client for {device_mac}: {e}")
             disconnected_clients.append(client)
     
     # Remove disconnected clients
@@ -1128,6 +1129,12 @@ async def notify_device_update(device_mac: str):
         if client in connected_clients:
             connected_clients.remove(client)
             print(f"Removed disconnected client. Remaining: {len(connected_clients)}")
+            
+    # Update server active status if no clients left
+    global websocket_server_active
+    if len(connected_clients) == 0:
+        websocket_server_active = False
+        print("No more WebSocket clients, marking server as inactive")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -1156,11 +1163,28 @@ async def websocket_endpoint(websocket: WebSocket):
             stop_scan_event.clear()  # Reset stop event
             print("Starting initial network scan...")
             devices = await scan_network()
-            if websocket in connected_clients:  # Check if client is still connected
-                await websocket.send_json({
-                    'type': 'network_update',
-                    'data': devices
-                })
+            
+            # Verify WebSocket is still connected before sending
+            if websocket in connected_clients:
+                try:
+                    # Check WebSocket state before sending
+                    if hasattr(websocket, 'client_state') and websocket.client_state.name != 'CONNECTED':
+                        print("WebSocket disconnected during initial scan, skipping update")
+                        return
+                        
+                    await websocket.send_json({
+                        'type': 'network_update',
+                        'data': devices
+                    })
+                    print("Initial scan completed and results sent to client")
+                except Exception as send_error:
+                    print(f"Error sending initial scan results: {send_error}")
+                    # Remove client from connected list if send failed
+                    if websocket in connected_clients:
+                        connected_clients.remove(websocket)
+            else:
+                print("Client disconnected during initial scan")
+                
         except Exception as e:
             print(f"Error during initial scan: {str(e)}")
         
@@ -1197,14 +1221,31 @@ async def websocket_endpoint(websocket: WebSocket):
                     async def perform_scan():
                         try:
                             devices = await scan_network()
+                            
+                            # Verify WebSocket is still connected before sending
                             if websocket in connected_clients:
-                                await websocket.send_json({
-                                    'type': 'network_update',
-                                    'data': devices
-                                })
-                                await websocket.send_json({
-                                    'type': 'scan_complete'
-                                })
+                                try:
+                                    # Check WebSocket state before sending
+                                    if hasattr(websocket, 'client_state') and websocket.client_state.name != 'CONNECTED':
+                                        print("WebSocket disconnected during manual scan, skipping results")
+                                        return
+                                        
+                                    await websocket.send_json({
+                                        'type': 'network_update',
+                                        'data': devices
+                                    })
+                                    await websocket.send_json({
+                                        'type': 'scan_complete'
+                                    })
+                                    print("Manual scan completed and results sent to client")
+                                except Exception as send_error:
+                                    print(f"Error sending manual scan results: {send_error}")
+                                    # Remove client from connected list if send failed
+                                    if websocket in connected_clients:
+                                        connected_clients.remove(websocket)
+                            else:
+                                print("Client disconnected during manual scan")
+                                
                         except Exception as e:
                             print(f"Error during manual scan: {str(e)}")
                     
@@ -1243,14 +1284,18 @@ async def websocket_endpoint(websocket: WebSocket):
                             print(f"Starting background vendor lookup for MAC: {device_mac}")
                             
                             def vendor_callback(mac_addr, found_vendor, found_device_type):
-                                """Callback to send updated device info to client"""
-                                if mac_addr in device_history:
-                                    device_history[mac_addr]['vendor'] = found_vendor
-                                    device_history[mac_addr]['device_type'] = found_device_type
-                                    print(f"Background lookup complete - Vendor: {found_vendor}, Type: {found_device_type}")
-                                    
-                                    # Send updated info to all connected clients
-                                    schedule_device_notification(mac_addr)
+                                """Callback to update device info safely"""
+                                try:
+                                    if mac_addr in device_history:
+                                        device_history[mac_addr]['vendor'] = found_vendor
+                                        device_history[mac_addr]['device_type'] = found_device_type
+                                        print(f"Background lookup complete - Vendor: {found_vendor}, Type: {found_device_type}")
+                                        
+                                        # Only schedule notification if we have active WebSocket connections
+                                        if websocket_server_active and connected_clients:
+                                            schedule_device_notification(mac_addr)
+                                except Exception as e:
+                                    print(f"Error in vendor callback for {mac_addr}: {e}")
                             
                             request_vendor_lookup_async(device_mac, vendor_callback)
                         
@@ -1284,10 +1329,30 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         print("Auto scan triggered")
                         devices = await scan_network()
-                        await websocket.send_json({
-                            'type': 'network_update',
-                            'data': devices
-                        })
+                        
+                        # Verify WebSocket is still connected before sending
+                        if websocket in connected_clients:
+                            try:
+                                # Check WebSocket state before sending
+                                if hasattr(websocket, 'client_state') and websocket.client_state.name != 'CONNECTED':
+                                    print("WebSocket disconnected during auto scan, skipping results")
+                                    break
+                                    
+                                await websocket.send_json({
+                                    'type': 'network_update',
+                                    'data': devices
+                                })
+                                print("Auto scan completed and results sent to client")
+                            except Exception as send_error:
+                                print(f"Error sending auto scan results: {send_error}")
+                                # Remove client from connected list if send failed
+                                if websocket in connected_clients:
+                                    connected_clients.remove(websocket)
+                                break
+                        else:
+                            print("Client disconnected during auto scan")
+                            break
+                            
                     except Exception as e:
                         print(f"Error during auto scan: {str(e)}")
                 
@@ -1719,6 +1784,144 @@ async def reset_system():
     
     return {"message": "System data reset successfully"}
 
+@app.post("/api/security/hash-file")
+async def hash_local_file(file: UploadFile = File(...)):
+    """Calculate hashes for a local file without uploading to VirusTotal"""
+    try:
+        content = await file.read()
+        
+        # Calculate multiple hash types
+        md5_hash = hashlib.md5(content).hexdigest()
+        sha1_hash = hashlib.sha1(content).hexdigest()
+        sha256_hash = hashlib.sha256(content).hexdigest()
+        
+        return {
+            "filename": file.filename,
+            "size": len(content),
+            "hashes": {
+                "md5": md5_hash,
+                "sha1": sha1_hash,
+                "sha256": sha256_hash
+            }
+        }
+    except Exception as e:
+        print(f"Error calculating file hashes: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/security/virustotal-report/{file_id}")
+async def get_virustotal_report(file_id: str, api_key: str):
+    """Get VirusTotal file report using file hash (SHA-256, SHA-1, or MD5)"""
+    try:
+        if not api_key:
+            return {"error": "API key is required"}
+        
+        url = f"https://www.virustotal.com/api/v3/files/{file_id}"
+        headers = {
+            "accept": "application/json",
+            "x-apikey": api_key
+        }
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Extract relevant information
+            attributes = data.get("data", {}).get("attributes", {})
+            stats = attributes.get("last_analysis_stats", {})
+            
+            return {
+                "file_id": file_id,
+                "scan_date": attributes.get("last_analysis_date"),
+                "stats": stats,
+                "malicious": stats.get("malicious", 0),
+                "suspicious": stats.get("suspicious", 0),
+                "undetected": stats.get("undetected", 0),
+                "harmless": stats.get("harmless", 0),
+                "timeout": stats.get("timeout", 0),
+                "confirmed-timeout": stats.get("confirmed-timeout", 0),
+                "failure": stats.get("failure", 0),
+                "type-unsupported": stats.get("type-unsupported", 0),
+                "total_scans": sum(stats.values()) if stats else 0,
+                "detection_ratio": f"{stats.get('malicious', 0)}/{sum(stats.values())}" if stats else "0/0",
+                "engines": attributes.get("last_analysis_results", {}),
+                "file_info": {
+                    "size": attributes.get("size"),
+                    "type": attributes.get("type_description"),
+                    "magic": attributes.get("magic"),
+                    "md5": attributes.get("md5"),
+                    "sha1": attributes.get("sha1"), 
+                    "sha256": attributes.get("sha256"),
+                    "names": attributes.get("names", [])
+                },
+                "permalink": f"https://www.virustotal.com/gui/file/{file_id}",
+                "raw_response": data
+            }
+        elif response.status_code == 404:
+            return {
+                "file_id": file_id,
+                "status": "not_found",
+                "message": "File not found in VirusTotal database. This could mean the file has never been scanned before.",
+                "suggestion": "Consider uploading the file to VirusTotal for analysis if you believe it should be scanned."
+            }
+        else:
+            return {
+                "error": f"VirusTotal API error: {response.status_code}",
+                "message": response.text,
+                "file_id": file_id
+            }
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Network error querying VirusTotal: {e}")
+        return {"error": f"Network error: {str(e)}"}
+    except Exception as e:
+        print(f"Error querying VirusTotal: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/security/scan-file")
+async def api_scan_file(file: UploadFile = File(...), api_key: str = Form(None)):
+    """Upload a file to VirusTotal for scanning (api_key optional in form)."""
+    try:
+        content = await file.read()
+        hashes = VirusTotalScanner().compute_hashes(content)
+
+        # If API key provided, set it on the module scanner for lookup/upload
+        if api_key:
+            try:
+                vt_scanner.set_api_key(api_key)
+            except Exception as e:
+                print(f"Warning: could not set vt api key: {e}")
+
+        # If module scanner has an API key, try to upload
+        if vt_scanner.api_key:
+            try:
+                upload_result = vt_scanner.upload_file(content, filename=file.filename)
+            except Exception as e:
+                upload_result = {"status": "error", "detail": str(e)}
+        else:
+            upload_result = {"status": "no_api_key", "detail": "No API key provided; computed hashes returned"}
+
+        return {"hashes": hashes, "upload": upload_result}
+    except Exception as e:
+        print(f"Error in scan-file endpoint: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/security/scan-hash/{hash_value}")
+async def api_scan_hash(hash_value: str, api_key: str = None):
+    """Lookup a file hash on VirusTotal. API key can be provided as query param."""
+    try:
+        if api_key:
+            vt_scanner.set_api_key(api_key)
+
+        if not vt_scanner.api_key:
+            return {"status": "no_api_key", "detail": "Provide an API key to query VirusTotal"}
+
+        result = vt_scanner.scan_hash(hash_value)
+        return result
+    except Exception as e:
+        print(f"Error in scan-hash endpoint: {e}")
+        return {"error": str(e)}
+
 if __name__ == "__main__":
     # Start the vendor lookup service
     vendor_service.start()
@@ -1730,4 +1933,4 @@ if __name__ == "__main__":
     finally:
         # Stop the vendor service when shutting down
         vendor_service.stop()
-        print("NetSentinel shutdown complete.") 
+        print("NetSentinel shutdown complete.")
